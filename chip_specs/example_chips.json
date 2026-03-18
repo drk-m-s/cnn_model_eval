@@ -1,0 +1,30 @@
+[
+  {
+    "name": "Edge_NPU_4TOPS",
+    "int8_tops": 4.0,
+    "dram_bandwidth_gbps": 12.8,
+    "compute_efficiency": 0.70,
+    "memory_efficiency": 0.75
+  },
+  {
+    "name": "Mid_NPU_10TOPS",
+    "int8_tops": 10.0,
+    "dram_bandwidth_gbps": 25.6,
+    "compute_efficiency": 0.70,
+    "memory_efficiency": 0.80
+  },
+  {
+    "name": "High_NPU_30TOPS",
+    "int8_tops": 30.0,
+    "dram_bandwidth_gbps": 51.2,
+    "compute_efficiency": 0.75,
+    "memory_efficiency": 0.80
+  },
+  {
+    "name": "Server_NPU_100TOPS",
+    "int8_tops": 100.0,
+    "dram_bandwidth_gbps": 102.4,
+    "compute_efficiency": 0.65,
+    "memory_efficiency": 0.75
+  }
+]
