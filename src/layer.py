@@ -11,11 +11,25 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 
-# Bytes per element for each quantization type
+# Bytes per weight element for each quantization type
 BYTES_PER_ELEMENT: Dict[str, float] = {
     "int8": 1.0,
     "fp16": 2.0,
     "int4": 0.5,
+}
+
+# Bytes per activation element (INT4 uses W4A8: activations remain INT8)
+ACTIVATION_BYTES_PER_ELEMENT: Dict[str, float] = {
+    "int8": 1.0,
+    "fp16": 2.0,
+    "int4": 1.0,
+}
+
+# Bytes per bias element (bias stored at accumulator precision)
+BIAS_BYTES_PER_ELEMENT: Dict[str, float] = {
+    "int8": 4.0,   # INT32
+    "fp16": 4.0,   # FP32
+    "int4": 4.0,   # INT32
 }
 
 
@@ -52,10 +66,13 @@ class LayerProfile:
     macs: int = 0           # Multiply-accumulate operations
     is_fused: bool = False  # If True, this layer is fused into a preceding layer (0 cost)
     activation_read_elements: Optional[int] = None  # Total activation elements to read; None = use primary input only
+    ops_override: Optional[int] = None  # If set, used instead of macs * 2 for ops count
 
     @property
     def ops(self) -> int:
-        """Total arithmetic operations (each MAC = 2 OPS: one multiply + one add)."""
+        """Total arithmetic operations. Uses ops_override if set, else macs * 2."""
+        if self.ops_override is not None:
+            return self.ops_override
         return self.macs * 2
 
     @property
@@ -76,37 +93,47 @@ class LayerProfile:
         """Number of elements in the primary output activation tensor."""
         return _product(self.primary_output_shape)
 
+    def total_output_elements(self) -> int:
+        """Number of elements across ALL output tensors."""
+        total = 0
+        for shape in self.output_shapes:
+            total += _product(shape)
+        return total
+
     def dram_read_bytes(self, quantization: str) -> float:
         """
         Estimated DRAM bytes READ for this layer.
 
         Includes:
-          - Input activation (read from DRAM)
-          - Weights (read from DRAM)
-          - Bias (read from DRAM)
+          - Input activation (read from DRAM) — uses activation bpe
+          - Weights (read from DRAM) — uses weight bpe
+          - Bias (read from DRAM) — uses accumulator precision (INT32/FP32)
 
         For batch=1, we assume no on-chip caching of activations across layers
         (conservative / worst-case DRAM traffic estimate).
         """
         if self.is_fused:
             return 0.0
-        bpe = BYTES_PER_ELEMENT.get(quantization.lower(), 1.0)
+        q = quantization.lower()
+        act_bpe = ACTIVATION_BYTES_PER_ELEMENT.get(q, 1.0)
+        weight_bpe = BYTES_PER_ELEMENT.get(q, 1.0)
+        bias_bpe = BIAS_BYTES_PER_ELEMENT.get(q, 4.0)
         if self.activation_read_elements is not None:
-            activation_bytes = self.activation_read_elements * bpe
+            activation_bytes = self.activation_read_elements * act_bpe
         else:
-            activation_bytes = self.input_activation_elements() * bpe
-        weight_bytes = self.weight_params * bpe
-        bias_bytes = self.bias_params * bpe  # bias often stored at higher precision, but we simplify
+            activation_bytes = self.input_activation_elements() * act_bpe
+        weight_bytes = self.weight_params * weight_bpe
+        bias_bytes = self.bias_params * bias_bpe
         return activation_bytes + weight_bytes + bias_bytes
 
     def dram_write_bytes(self, quantization: str) -> float:
         """
-        Estimated DRAM bytes WRITTEN for this layer (output activation).
+        Estimated DRAM bytes WRITTEN for this layer (all output activations).
         """
         if self.is_fused:
             return 0.0
-        bpe = BYTES_PER_ELEMENT.get(quantization.lower(), 1.0)
-        return self.output_activation_elements() * bpe
+        act_bpe = ACTIVATION_BYTES_PER_ELEMENT.get(quantization.lower(), 1.0)
+        return self.total_output_elements() * act_bpe
 
     def total_dram_bytes(self, quantization: str) -> float:
         """Total DRAM traffic (read + write) in bytes."""

@@ -128,8 +128,8 @@ class TestLayerProfile(unittest.TestCase):
             weight_params=9408,  # 64*3*7*7
             bias_params=64,
         )
-        # int8: 1 byte per element
-        read = (3 * 224 * 224 + 9408 + 64) * 1.0
+        # int8: act=1 byte, weight=1 byte, bias=4 bytes (INT32)
+        read = 3 * 224 * 224 * 1.0 + 9408 * 1.0 + 64 * 4.0
         write = (64 * 112 * 112) * 1.0
         self.assertAlmostEqual(lp.total_dram_bytes("int8"), read + write)
 
@@ -142,8 +142,8 @@ class TestLayerProfile(unittest.TestCase):
             weight_params=9408,
             bias_params=64,
         )
-        # fp16: 2 bytes per element
-        read = (3 * 224 * 224 + 9408 + 64) * 2.0
+        # fp16: act=2 bytes, weight=2 bytes, bias=4 bytes (FP32)
+        read = 3 * 224 * 224 * 2.0 + 9408 * 2.0 + 64 * 4.0
         write = (64 * 112 * 112) * 2.0
         self.assertAlmostEqual(lp.total_dram_bytes("fp16"), read + write)
 

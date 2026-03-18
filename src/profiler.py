@@ -6,9 +6,12 @@ These functions are used by the ONNX parser to fill in LayerProfile fields.
 
 from __future__ import annotations
 
+import logging
 from typing import List, Optional, Tuple
 
 from .layer import BYTES_PER_ELEMENT
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -29,6 +32,11 @@ def compute_conv_macs(
     If bias: additionally C_out * H_out * W_out (negligible, but included).
     """
     if len(output_shape) < 4 or len(weight_shape) < 4:
+        logger.warning(
+            "Conv MAC computation skipped: output_shape=%s, weight_shape=%s "
+            "(expected 4D tensors). Possible shape inference failure.",
+            output_shape, weight_shape,
+        )
         return 0
 
     _, c_out, h_out, w_out = output_shape[:4]
@@ -54,6 +62,11 @@ def compute_conv_transpose_macs(
     MACs = H_out * W_out * C_out * K_h * K_w * (C_in / groups)
     """
     if len(output_shape) < 4 or len(weight_shape) < 4:
+        logger.warning(
+            "ConvTranspose MAC computation skipped: output_shape=%s, weight_shape=%s "
+            "(expected 4D tensors). Possible shape inference failure.",
+            output_shape, weight_shape,
+        )
         return 0
 
     _, c_out, h_out, w_out = output_shape[:4]

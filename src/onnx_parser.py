@@ -356,6 +356,7 @@ def _handle_pool(node, info: _GraphInfo) -> LayerProfile:
         kernel_size=kernel,
         strides=tuple(strides) if strides else None,
         macs=macs,
+        ops_override=macs,  # Pool: 1 op per window element (compare/add), not 2
     )
 
 
@@ -395,28 +396,44 @@ def _handle_batchnorm(node, info: _GraphInfo) -> LayerProfile:
     )
 
 
+# OPS per element for activation functions (used instead of blanket macs*2)
+_ACTIVATION_OPS_PER_ELEMENT = {
+    "Relu": 1,          # comparison
+    "Clip": 1,          # comparison (ReLU6)
+    "LeakyRelu": 2,     # compare + conditional multiply
+    "Sigmoid": 4,       # negate, exp, add, divide
+    "Tanh": 5,          # ~2*sigmoid(2x) - 1
+    "Softmax": 5,       # max, subtract, exp, sum, divide (per element)
+    "Elu": 4,           # compare, subtract, exp, multiply
+    "HardSigmoid": 3,   # multiply, add, clip
+    "HardSwish": 4,     # multiply, add, clip, multiply
+}
+
+
 def _handle_activation(node, info: _GraphInfo) -> LayerProfile:
     """Handle Relu, LeakyRelu, Sigmoid, Clip, Softmax, etc."""
     input_shapes = info.get_input_shapes(node)
     output_shapes = info.get_output_shapes(node)
     out_shape = output_shapes[0] if output_shapes else []
-    macs = compute_element_wise_macs(out_shape)
+    elements = compute_element_wise_macs(out_shape)
+    ops_per_elem = _ACTIVATION_OPS_PER_ELEMENT.get(node.op_type, 1)
 
     return LayerProfile(
         name=node.name or node.output[0],
         op_type=node.op_type,
         input_shapes=input_shapes,
         output_shapes=output_shapes,
-        macs=macs,
+        macs=elements,
+        ops_override=elements * ops_per_elem,
     )
 
 
 def _handle_elementwise(node, info: _GraphInfo) -> LayerProfile:
-    """Handle Add, Mul, Sub, Div — element-wise binary ops."""
+    """Handle Add, Mul, Sub, Div — element-wise binary ops (1 op per element)."""
     input_shapes = info.get_input_shapes(node)
     output_shapes = info.get_output_shapes(node)
     out_shape = output_shapes[0] if output_shapes else []
-    macs = compute_element_wise_macs(out_shape)
+    elements = compute_element_wise_macs(out_shape)
 
     # Check if any input is an initializer (learned parameter)
     weight_params = 0
@@ -432,18 +449,16 @@ def _handle_elementwise(node, info: _GraphInfo) -> LayerProfile:
         input_shapes=input_shapes,
         output_shapes=output_shapes,
         weight_params=weight_params,
-        macs=macs,
+        macs=elements,
+        ops_override=elements,  # 1 op per element for Add/Sub/Mul/Div
         activation_read_elements=act_elements,
     )
 
 
-def _handle_concat_resize(node, info: _GraphInfo) -> LayerProfile:
-    """Handle Concat, Resize, Upsample — data movement, minimal compute."""
+def _handle_concat(node, info: _GraphInfo) -> LayerProfile:
+    """Handle Concat — pure data movement, zero arithmetic."""
     input_shapes = info.get_input_shapes(node)
     output_shapes = info.get_output_shapes(node)
-    out_shape = output_shapes[0] if output_shapes else []
-    # Minimal compute: just data movement
-    macs = compute_element_wise_macs(out_shape)
     act_elements = _compute_activation_elements(node, info)
 
     return LayerProfile(
@@ -451,7 +466,41 @@ def _handle_concat_resize(node, info: _GraphInfo) -> LayerProfile:
         op_type=node.op_type,
         input_shapes=input_shapes,
         output_shapes=output_shapes,
-        macs=macs,
+        macs=0,
+        ops_override=0,
+        activation_read_elements=act_elements,
+    )
+
+
+def _handle_resize(node, info: _GraphInfo) -> LayerProfile:
+    """Handle Resize, Upsample — mode-dependent compute."""
+    input_shapes = info.get_input_shapes(node)
+    output_shapes = info.get_output_shapes(node)
+    out_shape = output_shapes[0] if output_shapes else []
+    act_elements = _compute_activation_elements(node, info)
+
+    out_elements = 1
+    for d in out_shape:
+        out_elements *= d
+    out_elements = out_elements if out_shape else 0
+
+    mode = _get_attribute(node, "mode", "nearest")
+    if mode == "nearest":
+        ops = 0  # index lookup only
+    elif mode == "linear":
+        ops = out_elements * 7  # bilinear: 4 mul + 3 add per element
+    elif mode == "cubic":
+        ops = out_elements * 40  # bicubic: ~36 mul + adds per element
+    else:
+        ops = out_elements  # conservative fallback
+
+    return LayerProfile(
+        name=node.name or node.output[0],
+        op_type=node.op_type,
+        input_shapes=input_shapes,
+        output_shapes=output_shapes,
+        macs=0,
+        ops_override=ops,
         activation_read_elements=act_elements,
     )
 
@@ -464,6 +513,16 @@ def _handle_reshape_like(node, info: _GraphInfo) -> LayerProfile:
     # Truly metadata-only ops incur zero DRAM cost
     zero_cost = node.op_type in _ZERO_COST_OPS
 
+    # For Gather/Slice, actual read is proportional to output (not full input)
+    activation_read_elements = None
+    if node.op_type in ("Gather", "Slice"):
+        out_shape = output_shapes[0] if output_shapes else []
+        if out_shape:
+            elems = 1
+            for d in out_shape:
+                elems *= d
+            activation_read_elements = elems
+
     return LayerProfile(
         name=node.name or node.output[0],
         op_type=node.op_type,
@@ -471,6 +530,7 @@ def _handle_reshape_like(node, info: _GraphInfo) -> LayerProfile:
         output_shapes=output_shapes,
         macs=0,
         is_fused=zero_cost,
+        activation_read_elements=activation_read_elements,
     )
 
 
@@ -517,9 +577,8 @@ _CONV_OPS = {"Conv", "ConvTranspose"}
 _POOL_OPS = {"MaxPool", "AveragePool", "GlobalAveragePool"}
 _ACTIVATION_OPS = {"Relu", "LeakyRelu", "Sigmoid", "Clip", "Softmax", "Tanh", "Elu", "HardSigmoid", "HardSwish"}
 _ELEMENTWISE_OPS = {"Add", "Sub", "Mul", "Div"}
-_CONCAT_RESIZE_OPS = {"Concat", "Resize", "Upsample"}
-_ZERO_COST_OPS = {"Reshape", "Flatten", "Transpose", "Squeeze", "Unsqueeze",
-                  "Shape", "Constant", "ConstantOfShape", "Cast"}
+_ZERO_COST_OPS = {"Reshape", "Flatten", "Squeeze", "Unsqueeze",
+                  "Shape", "Constant", "ConstantOfShape"}
 _RESHAPE_OPS = {"Reshape", "Flatten", "Transpose", "Squeeze", "Unsqueeze", "Pad",
                 "Shape", "Gather", "Slice", "Split", "Cast",
                 "Constant", "ConstantOfShape", "Expand", "Tile", "ScatterND"}
@@ -546,14 +605,87 @@ def _dispatch_node(
         return _handle_activation(node, info)
     elif op in _ELEMENTWISE_OPS:
         return _handle_elementwise(node, info)
-    elif op in _CONCAT_RESIZE_OPS:
-        return _handle_concat_resize(node, info)
+    elif op == "Concat":
+        return _handle_concat(node, info)
+    elif op in ("Resize", "Upsample"):
+        return _handle_resize(node, info)
     elif op == "ReduceMean":
         return _handle_reduce_mean(node, info)
     elif op in _RESHAPE_OPS:
         return _handle_reshape_like(node, info)
     else:
         return _handle_generic(node, info)
+
+
+# ---------------------------------------------------------------------------
+# Operator fusion pass
+# ---------------------------------------------------------------------------
+
+def _apply_fusion_pass(
+    layers: List[LayerProfile],
+    graph_nodes: list,
+    info: _GraphInfo,
+) -> None:
+    """
+    Post-processing pass to apply common operator fusion patterns.
+
+    Supported fusions:
+      - SiLU: Sigmoid(X) + Mul(X, Sigmoid(X)) → single fused activation
+      - Conv + Activation: Conv → Relu/Clip fused (activation computed on-chip)
+    """
+    # Map: tensor name → (graph node, LayerProfile)
+    output_to_info = {}
+    for node, layer in zip(graph_nodes, layers):
+        for out_name in node.output:
+            output_to_info[out_name] = (node, layer)
+
+    for node, layer in zip(graph_nodes, layers):
+        if layer.is_fused:
+            continue
+
+        # --- SiLU fusion: Mul(X, Sigmoid(X)) ---
+        if node.op_type == "Mul" and len(node.input) >= 2:
+            inp0, inp1 = node.input[0], node.input[1]
+            sigmoid_layer = None
+            x_name = None
+
+            for sig_candidate, other in [(inp0, inp1), (inp1, inp0)]:
+                if sig_candidate in output_to_info:
+                    prod_node, prod_layer = output_to_info[sig_candidate]
+                    if (prod_node.op_type == "Sigmoid"
+                            and len(prod_node.input) >= 1
+                            and prod_node.input[0] == other):
+                        sigmoid_layer = prod_layer
+                        x_name = other
+                        break
+
+            if sigmoid_layer is not None:
+                # Mark Sigmoid as fused (zero cost)
+                sigmoid_layer.is_fused = True
+                # Mul represents the full SiLU: sigmoid (4) + multiply (1) = 5 ops/element
+                out_shape = layer.primary_output_shape
+                out_elems = 1
+                for d in out_shape:
+                    out_elems *= d
+                out_elems = out_elems if out_shape else 0
+                layer.ops_override = out_elems * 5
+                # Mul only reads x (not also the sigmoid intermediate)
+                x_shape = info.get_shape(x_name)
+                if x_shape:
+                    x_elems = 1
+                    for d in x_shape:
+                        x_elems *= d
+                    layer.activation_read_elements = x_elems
+                logger.debug("Fused SiLU: %s + %s", sigmoid_layer.name, layer.name)
+
+        # --- Conv + Activation fusion: activation is free after Conv ---
+        elif node.op_type in ("Relu", "Clip") and len(node.input) >= 1:
+            inp_name = node.input[0]
+            if inp_name in output_to_info:
+                prod_node, _ = output_to_info[inp_name]
+                if prod_node.op_type in ("Conv", "ConvTranspose"):
+                    layer.is_fused = True
+                    logger.debug("Fused Conv+%s: %s", node.op_type, layer.name)
 
 
 # ---------------------------------------------------------------------------
@@ -595,9 +727,13 @@ def parse_onnx_model(
 
     layers: List[LayerProfile] = []
 
-    for node in model.graph.node:
+    graph_nodes = list(model.graph.node)
+    for node in graph_nodes:
         profile = _dispatch_node(node, info)
         layers.append(profile)
+
+    # Apply operator fusion patterns (SiLU, Conv+Activation)
+    _apply_fusion_pass(layers, graph_nodes, info)
 
     # Log summary
     total_macs = sum(l.macs for l in layers)
