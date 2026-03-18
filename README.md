@@ -113,7 +113,7 @@ python main.py -m models/resnet50v1.onnx -r 224x224 -q int8 -c chip_specs/exampl
 python main.py -m models/yolov8s.onnx -r 640x640 -q fp16 -c chip_specs/example_chips.json --chip-index 2 -o results/yolov8s_fp16.json
 
 # MobileNetV2, INT4, evaluate on ALL chips in the spec file
-python main.py -m models/mobilenetv2.onnx -r 224x224 -q int4 -c chip_specs/example_chips.json
+python main.py -m models/mobilenetv2.onnx -r 224x224 -q int8 -c chip_specs/example_chips.json
 
 # Show only the top 10 slowest layers
 python main.py -m models/resnet50v1.onnx -r 224x224 -q int8 -c chip_specs/example_chips.json --chip-index 0 --top-layers 10

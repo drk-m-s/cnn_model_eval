@@ -51,6 +51,7 @@ class LayerProfile:
     # Computed workload
     macs: int = 0           # Multiply-accumulate operations
     is_fused: bool = False  # If True, this layer is fused into a preceding layer (0 cost)
+    activation_read_elements: Optional[int] = None  # Total activation elements to read; None = use primary input only
 
     @property
     def ops(self) -> int:
@@ -90,7 +91,10 @@ class LayerProfile:
         if self.is_fused:
             return 0.0
         bpe = BYTES_PER_ELEMENT.get(quantization.lower(), 1.0)
-        activation_bytes = self.input_activation_elements() * bpe
+        if self.activation_read_elements is not None:
+            activation_bytes = self.activation_read_elements * bpe
+        else:
+            activation_bytes = self.input_activation_elements() * bpe
         weight_bytes = self.weight_params * bpe
         bias_bytes = self.bias_params * bpe  # bias often stored at higher precision, but we simplify
         return activation_bytes + weight_bytes + bias_bytes

@@ -40,6 +40,33 @@ def compute_conv_macs(
     return int(macs)
 
 
+def compute_conv_transpose_macs(
+    input_shape: List[int],      # [N, C_in, H_in, W_in]
+    weight_shape: List[int],     # [C_in, C_out/groups, K_h, K_w]
+    output_shape: List[int],     # [N, C_out, H_out, W_out]
+    groups: int = 1,
+    has_bias: bool = False,
+) -> int:
+    """
+    Compute MACs for a 2D transposed convolution layer.
+
+    ConvTranspose weight shape is [C_in, C_out/groups, K_h, K_w].
+    MACs = H_out * W_out * C_out * K_h * K_w * (C_in / groups)
+    """
+    if len(output_shape) < 4 or len(weight_shape) < 4:
+        return 0
+
+    _, c_out, h_out, w_out = output_shape[:4]
+    c_in = weight_shape[0]
+    _, _, k_h, k_w = weight_shape[:4]
+
+    c_in_per_group = c_in // groups if groups > 0 else c_in
+    macs = h_out * w_out * c_out * k_h * k_w * c_in_per_group
+    if has_bias:
+        macs += c_out * h_out * w_out
+    return int(macs)
+
+
 def compute_gemm_macs(M: int, K: int, N: int, has_bias: bool = False) -> int:
     """
     Compute MACs for a fully-connected / Gemm layer.

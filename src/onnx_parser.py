@@ -26,6 +26,7 @@ from .layer import LayerProfile
 from .profiler import (
     compute_batchnorm_macs,
     compute_conv_macs,
+    compute_conv_transpose_macs,
     compute_element_wise_macs,
     compute_gemm_macs,
     compute_matmul_macs,
@@ -201,6 +202,21 @@ class _GraphInfo:
 # Node handlers
 # ---------------------------------------------------------------------------
 
+
+def _compute_activation_elements(node, info: _GraphInfo) -> int:
+    """Sum elements of all non-initializer inputs (i.e., activation tensors read from DRAM)."""
+    total = 0
+    for inp_name in node.input:
+        if inp_name and not info.is_initializer(inp_name):
+            shape = info.get_shape(inp_name)
+            if shape:
+                elems = 1
+                for d in shape:
+                    elems *= d
+                total += elems
+    return total
+
+
 def _handle_conv(node, info: _GraphInfo) -> LayerProfile:
     input_shapes = info.get_input_shapes(node)
     output_shapes = info.get_output_shapes(node)
@@ -216,13 +232,22 @@ def _handle_conv(node, info: _GraphInfo) -> LayerProfile:
     has_bias = bias_params > 0
 
     out_shape = output_shapes[0] if output_shapes else []
-    macs = compute_conv_macs(
-        input_shape=input_shapes[0] if input_shapes else [],
-        weight_shape=weight_shape,
-        output_shape=out_shape,
-        groups=groups,
-        has_bias=has_bias,
-    )
+    if node.op_type == "ConvTranspose":
+        macs = compute_conv_transpose_macs(
+            input_shape=input_shapes[0] if input_shapes else [],
+            weight_shape=weight_shape,
+            output_shape=out_shape,
+            groups=groups,
+            has_bias=has_bias,
+        )
+    else:
+        macs = compute_conv_macs(
+            input_shape=input_shapes[0] if input_shapes else [],
+            weight_shape=weight_shape,
+            output_shape=out_shape,
+            groups=groups,
+            has_bias=has_bias,
+        )
 
     return LayerProfile(
         name=node.name or node.output[0],
@@ -291,6 +316,7 @@ def _handle_matmul(node, info: _GraphInfo) -> LayerProfile:
             weight_params += info.get_weight_elements(node, idx)
 
     macs = compute_matmul_macs(a_shape, b_shape)
+    act_elements = _compute_activation_elements(node, info)
 
     return LayerProfile(
         name=node.name or node.output[0],
@@ -299,6 +325,7 @@ def _handle_matmul(node, info: _GraphInfo) -> LayerProfile:
         output_shapes=output_shapes,
         weight_params=weight_params,
         macs=macs,
+        activation_read_elements=act_elements,
     )
 
 
@@ -332,7 +359,7 @@ def _handle_pool(node, info: _GraphInfo) -> LayerProfile:
     )
 
 
-def _handle_batchnorm(node, info: _GraphInfo, prev_node_type: Optional[str]) -> LayerProfile:
+def _handle_batchnorm(node, info: _GraphInfo) -> LayerProfile:
     input_shapes = info.get_input_shapes(node)
     output_shapes = info.get_output_shapes(node)
 
@@ -350,8 +377,9 @@ def _handle_batchnorm(node, info: _GraphInfo, prev_node_type: Optional[str]) -> 
         else:
             weight_params += elems  # mean, var
 
-    # Fuse BN with preceding Conv
-    is_fused = prev_node_type in ("Conv", "ConvTranspose")
+    # Fuse BN with preceding Conv (check actual data flow, not just node order)
+    producer = info.producer_map.get(node.input[0]) if node.input else None
+    is_fused = producer is not None and producer.op_type in ("Conv", "ConvTranspose")
 
     macs = 0 if is_fused else compute_batchnorm_macs(out_shape)
 
@@ -396,6 +424,8 @@ def _handle_elementwise(node, info: _GraphInfo) -> LayerProfile:
         if info.is_initializer(inp_name):
             weight_params += info.initializer_sizes.get(inp_name, 0)
 
+    act_elements = _compute_activation_elements(node, info)
+
     return LayerProfile(
         name=node.name or node.output[0],
         op_type=node.op_type,
@@ -403,6 +433,7 @@ def _handle_elementwise(node, info: _GraphInfo) -> LayerProfile:
         output_shapes=output_shapes,
         weight_params=weight_params,
         macs=macs,
+        activation_read_elements=act_elements,
     )
 
 
@@ -413,6 +444,7 @@ def _handle_concat_resize(node, info: _GraphInfo) -> LayerProfile:
     out_shape = output_shapes[0] if output_shapes else []
     # Minimal compute: just data movement
     macs = compute_element_wise_macs(out_shape)
+    act_elements = _compute_activation_elements(node, info)
 
     return LayerProfile(
         name=node.name or node.output[0],
@@ -420,13 +452,17 @@ def _handle_concat_resize(node, info: _GraphInfo) -> LayerProfile:
         input_shapes=input_shapes,
         output_shapes=output_shapes,
         macs=macs,
+        activation_read_elements=act_elements,
     )
 
 
 def _handle_reshape_like(node, info: _GraphInfo) -> LayerProfile:
-    """Handle Reshape, Flatten, Transpose, Squeeze, Unsqueeze — zero compute."""
+    """Handle Reshape, Flatten, Transpose, Squeeze, Unsqueeze, and other shape/data ops."""
     input_shapes = info.get_input_shapes(node)
     output_shapes = info.get_output_shapes(node)
+
+    # Truly metadata-only ops incur zero DRAM cost
+    zero_cost = node.op_type in _ZERO_COST_OPS
 
     return LayerProfile(
         name=node.name or node.output[0],
@@ -434,6 +470,25 @@ def _handle_reshape_like(node, info: _GraphInfo) -> LayerProfile:
         input_shapes=input_shapes,
         output_shapes=output_shapes,
         macs=0,
+        is_fused=zero_cost,
+    )
+
+
+def _handle_reduce_mean(node, info: _GraphInfo) -> LayerProfile:
+    """Handle ReduceMean — reduction with compute proportional to input size."""
+    input_shapes = info.get_input_shapes(node)
+    output_shapes = info.get_output_shapes(node)
+    in_shape = input_shapes[0] if input_shapes else []
+    macs = compute_element_wise_macs(in_shape)
+    act_elements = _compute_activation_elements(node, info)
+
+    return LayerProfile(
+        name=node.name or node.output[0],
+        op_type=node.op_type,
+        input_shapes=input_shapes,
+        output_shapes=output_shapes,
+        macs=macs,
+        activation_read_elements=act_elements,
     )
 
 
@@ -463,15 +518,16 @@ _POOL_OPS = {"MaxPool", "AveragePool", "GlobalAveragePool"}
 _ACTIVATION_OPS = {"Relu", "LeakyRelu", "Sigmoid", "Clip", "Softmax", "Tanh", "Elu", "HardSigmoid", "HardSwish"}
 _ELEMENTWISE_OPS = {"Add", "Sub", "Mul", "Div"}
 _CONCAT_RESIZE_OPS = {"Concat", "Resize", "Upsample"}
+_ZERO_COST_OPS = {"Reshape", "Flatten", "Transpose", "Squeeze", "Unsqueeze",
+                  "Shape", "Constant", "ConstantOfShape", "Cast"}
 _RESHAPE_OPS = {"Reshape", "Flatten", "Transpose", "Squeeze", "Unsqueeze", "Pad",
-                "Shape", "Gather", "Slice", "Split", "Cast", "ReduceMean",
+                "Shape", "Gather", "Slice", "Split", "Cast",
                 "Constant", "ConstantOfShape", "Expand", "Tile", "ScatterND"}
 
 
 def _dispatch_node(
     node,
     info: _GraphInfo,
-    prev_node_type: Optional[str],
 ) -> LayerProfile:
     """Dispatch a node to the appropriate handler."""
     op = node.op_type
@@ -485,13 +541,15 @@ def _dispatch_node(
     elif op in _POOL_OPS:
         return _handle_pool(node, info)
     elif op == "BatchNormalization":
-        return _handle_batchnorm(node, info, prev_node_type)
+        return _handle_batchnorm(node, info)
     elif op in _ACTIVATION_OPS:
         return _handle_activation(node, info)
     elif op in _ELEMENTWISE_OPS:
         return _handle_elementwise(node, info)
     elif op in _CONCAT_RESIZE_OPS:
         return _handle_concat_resize(node, info)
+    elif op == "ReduceMean":
+        return _handle_reduce_mean(node, info)
     elif op in _RESHAPE_OPS:
         return _handle_reshape_like(node, info)
     else:
@@ -536,12 +594,10 @@ def parse_onnx_model(
     info = _GraphInfo(model.graph)
 
     layers: List[LayerProfile] = []
-    prev_node_type: Optional[str] = None
 
     for node in model.graph.node:
-        profile = _dispatch_node(node, info, prev_node_type)
+        profile = _dispatch_node(node, info)
         layers.append(profile)
-        prev_node_type = node.op_type
 
     # Log summary
     total_macs = sum(l.macs for l in layers)
