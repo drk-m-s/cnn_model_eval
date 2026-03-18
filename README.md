@@ -112,6 +112,8 @@ python main.py -m models/resnet50v1.onnx -r 224x224 -q int8 -c chip_specs/exampl
 # YOLOv8s, FP16, on a 30-TOPS NPU, export to JSON
 python main.py -m models/yolov8s.onnx -r 640x640 -q fp16 -c chip_specs/example_chips.json --chip-index 2 -o results/yolov8s_fp16.json
 
+python main.py -m models/yolov8s.onnx -r 640x640 -q int8 -c chip_specs/example_chips.json -o results/yolov8s_int8.json
+
 # MobileNetV2, INT4, evaluate on ALL chips in the spec file
 python main.py -m models/mobilenetv2.onnx -r 224x224 -q int8 -c chip_specs/example_chips.json
 
