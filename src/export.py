@@ -138,6 +138,14 @@ def _result_to_dict(result: EvalResult) -> dict:
     }
 
 
+def _safe_arithmetic_intensity(value: float):
+    """Return a JSON-safe arithmetic intensity (replace inf with string)."""
+    import math
+    if math.isinf(value):
+        return "infinity"
+    return round(value, 2)
+
+
 def _layer_to_dict(lr: LayerResult) -> dict:
     """Convert a LayerResult to a JSON-serializable dict."""
     return {
@@ -151,7 +159,7 @@ def _layer_to_dict(lr: LayerResult) -> dict:
         "memory_time_ms": round(lr.memory_time_ms, 6),
         "layer_time_ms": round(lr.layer_time_ms, 6),
         "bottleneck": lr.bottleneck,
-        "arithmetic_intensity": round(lr.arithmetic_intensity, 2),
+        "arithmetic_intensity": _safe_arithmetic_intensity(lr.arithmetic_intensity),
         "is_fused": lr.is_fused,
     }
 
@@ -195,7 +203,7 @@ def export_csv(result: EvalResult, path: Union[str, Path]) -> None:
                 "memory_time_ms": round(lr.memory_time_ms, 6),
                 "layer_time_ms": round(lr.layer_time_ms, 6),
                 "bottleneck": lr.bottleneck,
-                "arithmetic_intensity": round(lr.arithmetic_intensity, 2),
+                "arithmetic_intensity": _safe_arithmetic_intensity(lr.arithmetic_intensity),
                 "is_fused": lr.is_fused,
             })
 
