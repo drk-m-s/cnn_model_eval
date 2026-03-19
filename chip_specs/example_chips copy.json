@@ -42,5 +42,16 @@
     "dram_bandwidth_gbps_1d": 102.4,
     "compute_efficiency_1d": 0.50,
     "memory_efficiency_1d": 0.60
+  },
+  {
+    "name": "Jetson_AGX_Xavier",
+    "int8_tops": 32.0,
+    "dram_bandwidth_gbps": 136.5,
+    "compute_efficiency": 0.50,
+    "memory_efficiency": 0.70,
+    "int8_tops_1d": 3.2,
+    "dram_bandwidth_gbps_1d": 136.5,
+    "compute_efficiency_1d": 0.50,
+    "memory_efficiency_1d": 0.60
   }
 ]
