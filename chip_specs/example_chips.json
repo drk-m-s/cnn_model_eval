@@ -1,37 +1,57 @@
 [
   {
-    "name": "Edge_NPU_1",
-    "int8_tops": 40.0,
-    "dram_bandwidth_gbps": 1200,
+    "name": "Custom_AI_NPU",
+    "int8_tops": 32.0,
+    "dram_bandwidth_gbps": 1200.0,
     "compute_efficiency": 0.70,
-    "memory_efficiency": 0.75
+    "memory_efficiency": 0.70,
+    "int8_tops_1d": 2.0,
+    "dram_bandwidth_gbps_1d": 120.0,
+    "compute_efficiency_1d": 0.70,
+    "memory_efficiency_1d": 0.70
   },
-{
+  {
     "name": "RK_1828",
     "int8_tops": 20.0,
-    "dram_bandwidth_gbps": 800,
+    "dram_bandwidth_gbps": 600,
     "compute_efficiency": 0.70,
-    "memory_efficiency": 0.75
+    "memory_efficiency": 0.6,
+    "int8_tops_1d": 2.0,
+    "dram_bandwidth_gbps_1d": 60.0,
+    "compute_efficiency_1d": 0.70,
+    "memory_efficiency_1d": 0.60
   },
   {
     "name": "Jetson_AGX_Orin_64GB",
-    "int8_tops": 248.0,
+    "int8_tops": 100.0,
     "dram_bandwidth_gbps": 204.8,
     "compute_efficiency": 0.70,
-    "memory_efficiency": 0.80
+    "memory_efficiency": 0.70,
+    "int8_tops_1d": 10.0,
+    "dram_bandwidth_gbps_1d": 204.8,
+    "compute_efficiency_1d": 0.50,
+    "memory_efficiency_1d": 0.60
   },
   {
     "name": "Jetson_Orin_NX_16GB",
-      "int8_tops": 50.0,
+    "int8_tops": 50.0,
     "dram_bandwidth_gbps": 102.4,
     "compute_efficiency": 0.70,
-    "memory_efficiency": 0.80
+    "memory_efficiency": 0.70,
+    "int8_tops_1d": 5.0,
+    "dram_bandwidth_gbps_1d": 102.4,
+    "compute_efficiency_1d": 0.50,
+    "memory_efficiency_1d": 0.60
   },
-    {
+  {
     "name": "Jetson_AGX_Xavier",
-      "int8_tops": 32.0,
+    "int8_tops": 32.0,
     "dram_bandwidth_gbps": 136.5,
     "compute_efficiency": 0.70,
-    "memory_efficiency": 0.80
+    "memory_efficiency": 0.70,
+    "int8_tops_1d": 3.2,
+    "dram_bandwidth_gbps_1d": 136.5,
+    "compute_efficiency_1d": 0.50,
+    "memory_efficiency_1d": 0.60
   }
 ]

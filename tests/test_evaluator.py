@@ -176,8 +176,25 @@ class TestChipSpec(unittest.TestCase):
                         compute_efficiency=0.7, memory_efficiency=0.8)
         self.assertAlmostEqual(chip.effective_bandwidth_gbps(), 40.0)
 
+    def test_effective_tops_1d_int8(self):
+        chip = ChipSpec(name="test", int8_tops=10.0, dram_bandwidth_gbps=50.0,
+                        compute_efficiency=0.7, memory_efficiency=0.8,
+                        int8_tops_1d=2.0, dram_bandwidth_gbps_1d=20.0,
+                        compute_efficiency_1d=0.5, memory_efficiency_1d=0.6)
+        # 2.0 * 1.0 * 0.5 = 1.0
+        self.assertAlmostEqual(chip.effective_tops_1d("int8"), 1.0)
+
+    def test_effective_bandwidth_1d(self):
+        chip = ChipSpec(name="test", int8_tops=10.0, dram_bandwidth_gbps=50.0,
+                        compute_efficiency=0.7, memory_efficiency=0.8,
+                        int8_tops_1d=2.0, dram_bandwidth_gbps_1d=20.0,
+                        compute_efficiency_1d=0.5, memory_efficiency_1d=0.6)
+        # 20.0 * 0.6 = 12.0
+        self.assertAlmostEqual(chip.effective_bandwidth_gbps_1d(), 12.0)
+
     def test_from_json(self):
-        data = [{"name": "TestChip", "int8_tops": 8.0, "dram_bandwidth_gbps": 32.0}]
+        data = [{"name": "TestChip", "int8_tops": 8.0, "dram_bandwidth_gbps": 32.0,
+                 "int8_tops_1d": 1.0, "dram_bandwidth_gbps_1d": 10.0}]
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(data, f)
             f.flush()
@@ -185,11 +202,15 @@ class TestChipSpec(unittest.TestCase):
         os.unlink(f.name)
         self.assertEqual(chip.name, "TestChip")
         self.assertEqual(chip.int8_tops, 8.0)
+        self.assertEqual(chip.int8_tops_1d, 1.0)
+        self.assertEqual(chip.dram_bandwidth_gbps_1d, 10.0)
 
     def test_unsupported_quantization(self):
         chip = ChipSpec(name="test", int8_tops=10.0, dram_bandwidth_gbps=50.0)
         with self.assertRaises(ValueError):
             chip.effective_tops("bf16")
+        with self.assertRaises(ValueError):
+            chip.effective_tops_1d("bf16")
 
 
 class TestEvaluator(unittest.TestCase):
@@ -200,10 +221,14 @@ class TestEvaluator(unittest.TestCase):
             dram_bandwidth_gbps=50.0,
             compute_efficiency=1.0,  # 100% for easy math
             memory_efficiency=1.0,
+            int8_tops_1d=1.0,
+            dram_bandwidth_gbps_1d=10.0,
+            compute_efficiency_1d=1.0,
+            memory_efficiency_1d=1.0,
         )
 
-    def test_compute_bound_layer(self):
-        """A layer with huge MACs but tiny data should be compute-bound."""
+    def test_compute_bound_layer_2d(self):
+        """A 2D layer with huge MACs but tiny data should be compute-bound."""
         chip = self._make_chip()
         layers = [
             LayerProfile(
@@ -213,13 +238,17 @@ class TestEvaluator(unittest.TestCase):
                 output_shapes=[[1, 256, 14, 14]],
                 weight_params=256 * 256 * 3 * 3,  # ~590K params
                 macs=256 * 256 * 3 * 3 * 14 * 14,  # ~115M MACs
+                compute_type="2d",
             ),
         ]
         result = evaluate(chip, layers, "int8", (14, 14), "test")
         self.assertEqual(result.layer_results[0].bottleneck, "compute")
+        self.assertEqual(result.layer_results[0].compute_type, "2d")
+        self.assertEqual(result.layers_2d, 1)
+        self.assertEqual(result.layers_1d, 0)
 
-    def test_memory_bound_layer(self):
-        """A layer with tiny MACs but large data should be memory-bound."""
+    def test_memory_bound_layer_1d(self):
+        """A 1D layer with tiny MACs but large data should be memory-bound."""
         chip = self._make_chip()
         layers = [
             LayerProfile(
@@ -229,10 +258,56 @@ class TestEvaluator(unittest.TestCase):
                 output_shapes=[[1, 512, 28, 28]],
                 weight_params=0,
                 macs=512 * 28 * 28,  # ~400K MACs (small)
+                compute_type="1d",
             ),
         ]
         result = evaluate(chip, layers, "int8", (28, 28), "test")
         self.assertEqual(result.layer_results[0].bottleneck, "memory")
+        self.assertEqual(result.layer_results[0].compute_type, "1d")
+        self.assertEqual(result.layers_1d, 1)
+        self.assertEqual(result.layers_2d, 0)
+
+    def test_1d_uses_1d_engine_throughput(self):
+        """1D layers should use the 1D engine's TOPS/BW, not the 2D engine's."""
+        chip = self._make_chip()  # 1D: 1 TOPS, 10 GB/s
+        layers = [
+            LayerProfile(
+                name="sigmoid",
+                op_type="Sigmoid",
+                input_shapes=[[1, 256, 28, 28]],
+                output_shapes=[[1, 256, 28, 28]],
+                weight_params=0,
+                macs=256 * 28 * 28,
+                ops_override=256 * 28 * 28 * 4,  # 4 ops/elem for Sigmoid
+                compute_type="1d",
+            ),
+        ]
+        result = evaluate(chip, layers, "int8", (28, 28), "test")
+        lr = result.layer_results[0]
+        # compute_time = ops / (1 TOPS * 1e12) = (200704*4) / 1e12
+        expected_compute = (256 * 28 * 28 * 4) / 1e12
+        self.assertAlmostEqual(lr.compute_time_s, expected_compute, places=18)
+
+    def test_2d_uses_2d_engine_throughput(self):
+        """2D layers should use the 2D engine's TOPS/BW."""
+        chip = self._make_chip()  # 2D: 10 TOPS, 50 GB/s
+        macs = 256 * 256 * 3 * 3 * 14 * 14
+        layers = [
+            LayerProfile(
+                name="conv",
+                op_type="Conv",
+                input_shapes=[[1, 256, 14, 14]],
+                output_shapes=[[1, 256, 14, 14]],
+                weight_params=256 * 256 * 3 * 3,
+                macs=macs,
+                compute_type="2d",
+            ),
+        ]
+        result = evaluate(chip, layers, "int8", (14, 14), "test")
+        lr = result.layer_results[0]
+        # compute_time = ops / (10 TOPS * 1e12) = (macs*2) / 10e12
+        expected_compute = (macs * 2) / (10.0 * 1e12)
+        self.assertAlmostEqual(lr.compute_time_s, expected_compute, places=18)
 
     def test_fused_layer_zero_time(self):
         """Fused layers should have zero execution time."""
@@ -263,6 +338,7 @@ class TestEvaluator(unittest.TestCase):
                 weight_params=9408,
                 bias_params=64,
                 macs=118013952,
+                compute_type="2d",
             ),
         ]
         result = evaluate(chip, layers, "int8", (224, 224), "test")
@@ -281,12 +357,47 @@ class TestEvaluator(unittest.TestCase):
                 weight_params=9408,
                 bias_params=64,
                 macs=118013952,
+                compute_type="2d",
             ),
         ]
         result_int8 = evaluate(chip, layers, "int8", (224, 224), "test")
         result_fp16 = evaluate(chip, layers, "fp16", (224, 224), "test")
         # FP16 should be slower → lower FPS
         self.assertGreater(result_int8.fps, result_fp16.fps)
+
+    def test_mixed_2d_1d_layers(self):
+        """A model with both 2D and 1D layers should track engine breakdown."""
+        chip = self._make_chip()
+        layers = [
+            LayerProfile(
+                name="conv1",
+                op_type="Conv",
+                input_shapes=[[1, 3, 224, 224]],
+                output_shapes=[[1, 64, 112, 112]],
+                weight_params=9408,
+                bias_params=64,
+                macs=118013952,
+                compute_type="2d",
+            ),
+            LayerProfile(
+                name="relu1",
+                op_type="Relu",
+                input_shapes=[[1, 64, 112, 112]],
+                output_shapes=[[1, 64, 112, 112]],
+                weight_params=0,
+                macs=64 * 112 * 112,
+                compute_type="1d",
+            ),
+        ]
+        result = evaluate(chip, layers, "int8", (224, 224), "test")
+        self.assertEqual(result.layers_2d, 1)
+        self.assertEqual(result.layers_1d, 1)
+        self.assertGreater(result.total_time_2d_s, 0)
+        self.assertGreater(result.total_time_1d_s, 0)
+        self.assertAlmostEqual(
+            result.total_time_s,
+            result.total_time_2d_s + result.total_time_1d_s,
+        )
 
 
 class TestDRAMBytesHelper(unittest.TestCase):

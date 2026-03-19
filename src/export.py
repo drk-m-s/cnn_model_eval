@@ -32,6 +32,7 @@ def format_layer_table(result: EvalResult, top_n: int | None = None) -> str:
     headers = [
         "Layer",
         "Op",
+        "Engine",
         "MACs (M)",
         "DRAM (KB)",
         "Compute (ms)",
@@ -53,6 +54,7 @@ def format_layer_table(result: EvalResult, top_n: int | None = None) -> str:
             rows.append([
                 _truncate(lr.name, 35),
                 lr.op_type,
+                lr.compute_type.upper(),
                 f"{lr.macs / 1e6:.2f}",
                 "-",
                 "-",
@@ -64,6 +66,7 @@ def format_layer_table(result: EvalResult, top_n: int | None = None) -> str:
             rows.append([
                 _truncate(lr.name, 35),
                 lr.op_type,
+                lr.compute_type.upper(),
                 f"{lr.macs / 1e6:.2f}",
                 f"{lr.dram_bytes / 1024:.1f}",
                 f"{lr.compute_time_ms:.4f}",
@@ -104,6 +107,10 @@ def _result_to_dict(result: EvalResult) -> dict:
             "dram_bandwidth_gbps": result.chip.dram_bandwidth_gbps,
             "compute_efficiency": result.chip.compute_efficiency,
             "memory_efficiency": result.chip.memory_efficiency,
+            "int8_tops_1d": result.chip.int8_tops_1d,
+            "dram_bandwidth_gbps_1d": result.chip.dram_bandwidth_gbps_1d,
+            "compute_efficiency_1d": result.chip.compute_efficiency_1d,
+            "memory_efficiency_1d": result.chip.memory_efficiency_1d,
         },
         "model": result.model_name,
         "quantization": result.quantization,
@@ -122,6 +129,10 @@ def _result_to_dict(result: EvalResult) -> dict:
             "fps": round(result.fps, 2),
             "compute_bound_layers": result.compute_bound_layers,
             "memory_bound_layers": result.memory_bound_layers,
+            "total_time_2d_ms": round(result.total_time_2d_s * 1e3, 4),
+            "total_time_1d_ms": round(result.total_time_1d_s * 1e3, 4),
+            "layers_2d": result.layers_2d,
+            "layers_1d": result.layers_1d,
         },
         "layers": [_layer_to_dict(lr) for lr in result.layer_results],
     }
@@ -132,6 +143,7 @@ def _layer_to_dict(lr: LayerResult) -> dict:
     return {
         "name": lr.name,
         "op_type": lr.op_type,
+        "compute_type": lr.compute_type,
         "macs": lr.macs,
         "ops": lr.ops,
         "dram_bytes": round(lr.dram_bytes, 2),
@@ -156,6 +168,7 @@ def export_csv(result: EvalResult, path: Union[str, Path]) -> None:
     fieldnames = [
         "layer_name",
         "op_type",
+        "compute_type",
         "macs",
         "ops",
         "dram_bytes",
@@ -174,6 +187,7 @@ def export_csv(result: EvalResult, path: Union[str, Path]) -> None:
             writer.writerow({
                 "layer_name": lr.name,
                 "op_type": lr.op_type,
+                "compute_type": lr.compute_type,
                 "macs": lr.macs,
                 "ops": lr.ops,
                 "dram_bytes": round(lr.dram_bytes, 2),

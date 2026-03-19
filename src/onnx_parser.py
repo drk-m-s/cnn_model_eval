@@ -261,6 +261,7 @@ def _handle_conv(node, info: _GraphInfo) -> LayerProfile:
         weight_params=weight_params,
         bias_params=bias_params,
         macs=macs,
+        compute_type="2d",
     )
 
 
@@ -299,6 +300,7 @@ def _handle_gemm(node, info: _GraphInfo) -> LayerProfile:
         weight_params=weight_params,
         bias_params=bias_params,
         macs=macs,
+        compute_type="2d",
     )
 
 
@@ -326,6 +328,7 @@ def _handle_matmul(node, info: _GraphInfo) -> LayerProfile:
         weight_params=weight_params,
         macs=macs,
         activation_read_elements=act_elements,
+        compute_type="2d",
     )
 
 

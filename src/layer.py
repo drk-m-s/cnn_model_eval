@@ -68,6 +68,11 @@ class LayerProfile:
     activation_read_elements: Optional[int] = None  # Total activation elements to read; None = use primary input only
     ops_override: Optional[int] = None  # If set, used instead of macs * 2 for ops count
 
+    # Compute engine classification:
+    #   "2d" — matrix multiply engine (Conv, Gemm, MatMul)
+    #   "1d" — vector/special function engine (activations, element-wise, pool, etc.)
+    compute_type: str = "1d"
+
     @property
     def ops(self) -> int:
         """Total arithmetic operations. Uses ops_override if set, else macs * 2."""
